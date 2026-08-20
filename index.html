@@ -329,9 +329,21 @@ select.panel-select:hover{ border-color: var(--brass); }
 }
 .quiz-tabs button[aria-pressed="true"]{ background: var(--copper); color: var(--wood-950); border-color: var(--copper); font-weight:700; }
 
-.score-row{ display:flex; gap:26px; margin-bottom:18px; flex-wrap:wrap; }
+.score-row{ display:flex; gap:26px; margin-bottom:12px; flex-wrap:wrap; }
 .score-row .stat b{ font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size:1.5rem; color: var(--verdigris-bright); display:block; }
 .score-row .stat span{ font-size:.68rem; text-transform:uppercase; letter-spacing:.1em; color: var(--parchment-faint); }
+#quiz-level{ color: var(--brass-bright); }
+
+.level-row{ display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:18px; }
+.progress-dots{ display:flex; gap:5px; }
+.progress-dots i{ width:9px; height:9px; border-radius:50%; display:inline-block; background: var(--wood-700); border:1px solid rgba(241,230,210,.2); }
+.progress-dots i.filled{ background: var(--verdigris-bright); border-color: var(--verdigris-bright); }
+.level-note{ font-size:.78rem; color: var(--parchment-faint); }
+.reset-link{
+  appearance:none; border:0; background:none; color: var(--parchment-faint); font-size:.72rem;
+  text-decoration: underline; text-underline-offset:2px; cursor:pointer; padding:0; margin-left:auto;
+}
+.reset-link:hover{ color: var(--parchment); }
 
 .question-text{ font-size:1.1rem; margin-bottom:14px; color: var(--parchment); }
 .question-text b{ color: var(--brass-bright); }
@@ -510,7 +522,7 @@ footer .fmark{ font-family: var(--font-mono); letter-spacing:.1em; text-transfor
   <section id="panel-quiz" class="panel" role="tabpanel">
     <div class="section-head">
       <h2>Drills</h2>
-      <p>Three short drills. No timers, no pressure — just reps.</p>
+      <p>Three drills that get harder as you go. No timers, no pressure — just reps that keep pace with you.</p>
     </div>
     <div class="module">
       <div class="quiz-tabs" id="quiz-tabs">
@@ -522,7 +534,12 @@ footer .fmark{ font-family: var(--font-mono); letter-spacing:.1em; text-transfor
       <div class="score-row">
         <div class="stat"><b id="quiz-correct">0</b><span>Correct</span></div>
         <div class="stat"><b id="quiz-total">0</b><span>Attempted</span></div>
-        <div class="stat"><b id="quiz-streak">0</b><span>Streak</span></div>
+        <div class="stat"><b id="quiz-level">1</b><span>Level</span></div>
+      </div>
+      <div class="level-row">
+        <div class="progress-dots" id="quiz-dots" aria-hidden="true"></div>
+        <span class="level-note" id="quiz-level-note"></span>
+        <button class="reset-link" id="quiz-reset" type="button">Reset this drill's level</button>
       </div>
 
       <p class="question-text" id="quiz-question"></p>
@@ -607,8 +624,17 @@ const TUNINGS = {
 };
 const STRING_OPTIONS = { bass:[4,5], guitar:[6] };
 
+// Real (register-aware) semitone offsets per open string, low string = 0 — used so
+// cross-string interval questions reflect the pitch you'd actually hear, not just
+// pitch-class distance. High-to-low order matches TUNINGS.
+const OPEN_ABS = {
+  bass:   { 4:[15,10,5,0], 5:[15,10,5,0,-5] },
+  guitar: { 6:[24,19,15,10,5,0] },
+};
+
 function openPCs(instrument, count){ return TUNINGS[instrument][count].map(n => pcOf(n)); }
 function pitchAt(instrument, count, stringIdx, fret){ return (openPCs(instrument, count)[stringIdx] + fret) % 12; }
+function absPitchAt(instrument, count, stringIdx, fret){ return OPEN_ABS[instrument][count][stringIdx] + fret; }
 
 function scaleDegreeMap(rootPc, scaleKey){
   const s = SCALES[scaleKey];
@@ -693,6 +719,38 @@ function makeDot(text, sub, cls){
   return d;
 }
 
+/* ============ Drill progress persistence ============ */
+// Defined ahead of `state` below since state's initializer calls loadProgress() immediately.
+
+const MAX_LEVEL = 5;
+const PROGRESS_KEY = 'rootPositionDrillProgress:v1';
+
+function defaultProgress(){
+  return {
+    note:     { level:1, correctStreak:0, missStreak:0 },
+    interval: { level:1, correctStreak:0, missStreak:0 },
+    build:    { level:1, correctStreak:0, missStreak:0 },
+  };
+}
+function loadProgress(){
+  try{
+    const raw = localStorage.getItem(PROGRESS_KEY);
+    if (!raw) return defaultProgress();
+    const parsed = JSON.parse(raw);
+    const base = defaultProgress();
+    ['note','interval','build'].forEach(k => {
+      if (parsed[k] && Number.isFinite(parsed[k].level)){
+        base[k].level = Math.min(MAX_LEVEL, Math.max(1, parsed[k].level));
+      }
+    });
+    return base;
+  } catch(e){ return defaultProgress(); }
+}
+function saveProgress(){
+  try{ localStorage.setItem(PROGRESS_KEY, JSON.stringify(state.quiz.progress)); }
+  catch(e){ /* storage unavailable (private mode, etc.) — progress just won't persist */ }
+}
+
 /* ============ Global-ish UI state ============ */
 
 const state = {
@@ -704,9 +762,8 @@ const state = {
   quiz: {
     mode: 'note',
     scores: { note:{c:0,t:0}, interval:{c:0,t:0}, build:{c:0,t:0} },
-    streak: 0,
-    note: null, interval: null,
-    build: { string:0, root:'C', scaleKey:'major', selected: new Set(), checked:false },
+    progress: loadProgress(),
+    note: null, interval: null, build: null,
   }
 };
 
@@ -802,6 +859,7 @@ document.getElementById('exp-string-toggle').addEventListener('click', e => {
   const btn = e.target.closest('button'); if (!btn) return;
   state.stringCount = Number(btn.dataset.count);
   [...btn.parentElement.children].forEach(b => b.setAttribute('aria-pressed', b===btn ? 'true':'false'));
+  resetQuizCache();
   renderExplorer(); renderSoloing(); renderQuiz();
 });
 document.getElementById('exp-instrument-toggle').addEventListener('click', e => {
@@ -809,6 +867,7 @@ document.getElementById('exp-instrument-toggle').addEventListener('click', e => 
   state.instrument = btn.dataset.instrument;
   [...btn.parentElement.children].forEach(b => b.setAttribute('aria-pressed', b===btn ? 'true':'false'));
   renderStringToggle();
+  resetQuizCache();
   renderExplorer(); renderSoloing(); renderQuiz();
 });
 renderStringToggle();
@@ -930,7 +989,41 @@ function chordLabelShort(k){
 }
 soloChordSelect.addEventListener('change', () => { state.solo.chord = soloChordSelect.value; renderSoloing(); });
 
-/* ============ Quiz ============ */
+/* ============ Quiz: adaptive difficulty ============ */
+
+// Each level widens the fretboard range and/or sharpens the challenge.
+const NOTE_LEVELS = [null,
+  { frets:4,  choices:4, confusable:false },
+  { frets:8,  choices:4, confusable:false },
+  { frets:12, choices:4, confusable:true  },
+  { frets:16, choices:5, confusable:true  },
+  { frets:16, choices:6, confusable:true  },
+];
+const INTERVAL_LEVELS = [null,
+  { maxSpan:4,  crossString:false, choices:4 },
+  { maxSpan:7,  crossString:false, choices:4 },
+  { maxSpan:11, crossString:false, choices:4 },
+  { maxSpan:7,  crossString:true,  choices:5 },
+  { maxSpan:11, crossString:true,  choices:6 },
+];
+const COMMON_SCALES = ['major','minorPentatonic','aeolian'];
+const MODE_SCALES = COMMON_SCALES.concat(['dorian','mixolydian','majorPentatonic']);
+const BUILD_LEVELS = [null,
+  { scales: COMMON_SCALES,        strings:1, frets:12 },
+  { scales: MODE_SCALES,          strings:1, frets:15 },
+  { scales: Object.keys(SCALES),  strings:1, frets:15 },
+  { scales: Object.keys(SCALES),  strings:2, frets:12 },
+  { scales: Object.keys(SCALES),  strings:3, frets:12 },
+];
+
+function joinNames(names){
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return names[0] + ' and ' + names[1];
+  return names.slice(0,-1).join(', ') + ' and ' + names[names.length-1];
+}
+function resetQuizCache(){
+  state.quiz.note = null; state.quiz.interval = null; state.quiz.build = null;
+}
 
 const quizTabs = document.getElementById('quiz-tabs');
 quizTabs.addEventListener('click', e => {
@@ -939,129 +1032,215 @@ quizTabs.addEventListener('click', e => {
   [...quizTabs.children].forEach(b => b.setAttribute('aria-pressed', b===btn ? 'true':'false'));
   renderQuiz();
 });
+document.getElementById('quiz-reset').addEventListener('click', () => {
+  const mode = state.quiz.mode;
+  state.quiz.progress[mode] = { level:1, correctStreak:0, missStreak:0 };
+  saveProgress();
+  state.quiz[mode] = null;
+  renderQuiz();
+});
 
 function rand(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
 function randInt(min,max){ return Math.floor(Math.random()*(max-min+1))+min; }
 
 function updateScoreUI(){
-  const sc = state.quiz.scores[state.quiz.mode];
+  const mode = state.quiz.mode;
+  const sc = state.quiz.scores[mode];
+  const p = state.quiz.progress[mode];
   document.getElementById('quiz-correct').textContent = sc.c;
   document.getElementById('quiz-total').textContent = sc.t;
-  document.getElementById('quiz-streak').textContent = state.quiz.streak;
+  document.getElementById('quiz-level').textContent = p.level;
+
+  const dots = document.getElementById('quiz-dots');
+  dots.innerHTML = '';
+  for (let i=0; i<3; i++) dots.appendChild(el('i', { class: i < p.correctStreak ? 'filled' : '' }));
+
+  const note = document.getElementById('quiz-level-note');
+  if (p.missStreak >= 1 && p.level > 1) note.textContent = 'One more miss backs off to level ' + (p.level-1) + '.';
+  else if (p.level >= MAX_LEVEL) note.textContent = 'Max level.';
+  else note.textContent = (3 - p.correctStreak) + ' more in a row to level up.';
 }
 
+function applyProgress(mode, ok){
+  const p = state.quiz.progress[mode];
+  let change = null;
+  if (ok){
+    p.correctStreak++; p.missStreak = 0;
+    if (p.correctStreak >= 3){
+      if (p.level < MAX_LEVEL){ p.level++; change = 'up'; }
+      p.correctStreak = 0;
+    }
+  } else {
+    p.missStreak++; p.correctStreak = 0;
+    if (p.missStreak >= 2 && p.level > 1){ p.level--; p.missStreak = 0; change = 'down'; }
+  }
+  saveProgress();
+  return change;
+}
+function recordAnswer(ok, msg){
+  const mode = state.quiz.mode;
+  const sc = state.quiz.scores[mode];
+  sc.t++; if (ok) sc.c++;
+  const change = applyProgress(mode, ok);
+  const fb = document.getElementById('quiz-feedback');
+  let text = msg;
+  if (change === 'up') text += '  Level up — now level ' + state.quiz.progress[mode].level + '.';
+  else if (change === 'down') text += '  Backing off to level ' + state.quiz.progress[mode].level + '.';
+  fb.textContent = text;
+  fb.className = 'feedback ' + (ok ? 'good':'bad');
+  updateScoreUI();
+}
+function addNextButton(fn){
+  const actions = document.getElementById('quiz-actions');
+  actions.innerHTML = '';
+  const b = el('button', {class:'btn primary'}, 'Next →');
+  b.addEventListener('click', fn);
+  actions.appendChild(b);
+}
+function buildChoiceGrid(correct, allOptions, onPick){
+  const grid = document.getElementById('quiz-answers');
+  grid.innerHTML = '';
+  document.getElementById('quiz-feedback').textContent = '';
+  document.getElementById('quiz-feedback').className = 'feedback';
+  document.getElementById('quiz-actions').innerHTML = '';
+  allOptions.forEach(name => {
+    const b = el('button', {class:'answer-btn'}, name);
+    b.addEventListener('click', () => {
+      grid.querySelectorAll('button').forEach(x => x.disabled = true);
+      const ok = name === correct;
+      b.classList.add(ok ? 'correct':'wrong');
+      if (!ok){ [...grid.children].find(x => x.textContent===correct).classList.add('correct'); }
+      onPick(ok);
+    });
+    grid.appendChild(b);
+  });
+}
+
+/* ---- Name the note ---- */
+
 function newNoteQuestion(){
+  const cfg = NOTE_LEVELS[state.quiz.progress.note.level];
   const s = randInt(0, state.stringCount-1);
-  const f = randInt(0, 12);
+  const f = randInt(0, cfg.frets);
   const pc = pitchAt(state.instrument, state.stringCount, s, f);
   state.quiz.note = { s, f, pc };
 }
 function renderNoteQuiz(){
   if (!state.quiz.note) newNoteQuestion();
+  const cfg = NOTE_LEVELS[state.quiz.progress.note.level];
   const { s, f, pc } = state.quiz.note;
   const flat = Math.random() < 0.3;
+
   document.getElementById('quiz-question').innerHTML =
     'What note is on the <b>' + TUNINGS[state.instrument][state.stringCount][s] + ' string</b>, <b>fret ' + f + '</b>?';
   buildFretboard(document.getElementById('quiz-fretboard'), {
     instrument: state.instrument, stringCount: state.stringCount, fretCount: 16,
-    decorate: (ss,ff,ppc) => (ss===s && ff===f) ? makeDot('?','', 'pick') : null,
+    decorate: (ss,ff) => (ss===s && ff===f) ? makeDot('?','', 'pick') : null,
   });
+
   const correct = noteName(pc, flat);
   const options = new Set([correct]);
-  while (options.size < 4) options.add(noteName(randInt(0,11), flat));
+  if (cfg.confusable) [1,-1,2,-2].forEach(d => { if (options.size < cfg.choices) options.add(noteName(pc+d, flat)); });
+  while (options.size < cfg.choices) options.add(noteName(randInt(0,11), flat));
   const opts = [...options].sort(() => Math.random()-0.5);
-  const grid = document.getElementById('quiz-answers');
-  grid.innerHTML = '';
-  document.getElementById('quiz-feedback').textContent = '';
-  document.getElementById('quiz-feedback').className = 'feedback';
-  document.getElementById('quiz-actions').innerHTML = '';
-  opts.forEach(name => {
-    const b = el('button',{class:'answer-btn'}, name);
-    b.addEventListener('click', () => {
-      grid.querySelectorAll('button').forEach(x => x.disabled = true);
-      const ok = name === correct;
-      b.classList.add(ok ? 'correct':'wrong');
-      if (!ok){ [...grid.children].find(x => x.textContent===correct).classList.add('correct'); }
-      recordAnswer(ok, ok ? (correct + ' — nice.') : ('That fret is ' + correct + '.'));
-      addNextButton(() => { newNoteQuestion(); renderQuiz(); });
-    });
-    grid.appendChild(b);
+
+  buildChoiceGrid(correct, opts, ok => {
+    recordAnswer(ok, ok ? (correct + ' — nice.') : ('That fret is ' + correct + '.'));
+    addNextButton(() => { newNoteQuestion(); renderQuiz(); });
   });
 }
 
+/* ---- Name the interval ---- */
+
 function newIntervalQuestion(){
-  const s = randInt(0, state.stringCount-1);
-  const f1 = randInt(0,10);
-  const f2 = f1 + randInt(1, Math.min(11, 15-f1));
-  state.quiz.interval = { s, f1, f2 };
+  const cfg = INTERVAL_LEVELS[state.quiz.progress.interval.level];
+  if (!cfg.crossString){
+    const s = randInt(0, state.stringCount-1);
+    const f1 = randInt(0, Math.max(0, 15-cfg.maxSpan));
+    const f2 = f1 + randInt(1, cfg.maxSpan);
+    state.quiz.interval = { s1:s, f1, s2:s, f2 };
+  } else {
+    let s1, s2;
+    do { s1 = randInt(0, state.stringCount-1); s2 = randInt(0, state.stringCount-1); } while (s2 === s1);
+    state.quiz.interval = { s1, f1: randInt(0,12), s2, f2: randInt(0,12) };
+  }
 }
 function renderIntervalQuiz(){
   if (!state.quiz.interval) newIntervalQuestion();
-  const { s, f1, f2 } = state.quiz.interval;
-  const semis = f2 - f1;
-  document.getElementById('quiz-question').innerHTML =
-    'Two notes on the <b>' + TUNINGS[state.instrument][state.stringCount][s] + ' string</b> — what interval separates them?';
+  const cfg = INTERVAL_LEVELS[state.quiz.progress.interval.level];
+  const { s1, f1, s2, f2 } = state.quiz.interval;
+  const tuning = TUNINGS[state.instrument][state.stringCount];
+  const abs1 = absPitchAt(state.instrument, state.stringCount, s1, f1);
+  const abs2 = absPitchAt(state.instrument, state.stringCount, s2, f2);
+  const semis = ((abs2 - abs1) % 12 + 12) % 12;
+
+  document.getElementById('quiz-question').innerHTML = (s1 === s2)
+    ? 'Two notes on the <b>' + tuning[s1] + ' string</b> — what interval separates them?'
+    : 'One note on the <b>' + tuning[s1] + ' string</b>, one on the <b>' + tuning[s2] + ' string</b> — what interval separates them?';
+
   buildFretboard(document.getElementById('quiz-fretboard'), {
     instrument: state.instrument, stringCount: state.stringCount, fretCount: 16,
-    decorate: (ss,ff) => (ss===s && (ff===f1||ff===f2)) ? makeDot(ff===f1?'1':'2','','pick') : null,
+    decorate: (ss,ff) => {
+      if (ss===s1 && ff===f1) return makeDot('1','','pick');
+      if (ss===s2 && ff===f2) return makeDot('2','','pick');
+      return null;
+    },
   });
-  const correct = INTERVAL_NAMES[semis % 12];
+
+  const correct = INTERVAL_NAMES[semis];
   const options = new Set([correct]);
-  while (options.size < 4) options.add(INTERVAL_NAMES[randInt(0,11)]);
+  while (options.size < cfg.choices) options.add(INTERVAL_NAMES[randInt(0,11)]);
   const opts = [...options].sort(() => Math.random()-0.5);
-  const grid = document.getElementById('quiz-answers');
-  grid.innerHTML = '';
-  document.getElementById('quiz-feedback').textContent = '';
-  document.getElementById('quiz-feedback').className = 'feedback';
-  document.getElementById('quiz-actions').innerHTML = '';
-  opts.forEach(name => {
-    const b = el('button',{class:'answer-btn'}, name);
-    b.addEventListener('click', () => {
-      grid.querySelectorAll('button').forEach(x => x.disabled = true);
-      const ok = name === correct;
-      b.classList.add(ok ? 'correct':'wrong');
-      if (!ok){ [...grid.children].find(x => x.textContent===correct).classList.add('correct'); }
-      recordAnswer(ok, ok ? (semis + ' frets = ' + correct + '.') : (semis + ' frets is a ' + correct + '.'));
-      addNextButton(() => { newIntervalQuestion(); renderQuiz(); });
-    });
-    grid.appendChild(b);
+
+  buildChoiceGrid(correct, opts, ok => {
+    recordAnswer(ok, ok ? (correct + ' — nice.') : ('That is a ' + correct + '.'));
+    addNextButton(() => { newIntervalQuestion(); renderQuiz(); });
   });
 }
 
+/* ---- Build the scale ---- */
+
 function newBuildQuestion(){
-  const scaleKeys = Object.keys(SCALES);
+  const cfg = BUILD_LEVELS[state.quiz.progress.build.level];
+  const n = Math.min(cfg.strings, state.stringCount);
+  const pool = Array.from({length: state.stringCount}, (_,i) => i);
+  const strings = [];
+  while (strings.length < n) strings.push(pool.splice(randInt(0, pool.length-1), 1)[0]);
+  strings.sort((a,b) => a-b);
   state.quiz.build = {
-    string: randInt(0, state.stringCount-1),
-    root: rand(ALL_ROOTS),
-    scaleKey: rand(scaleKeys),
-    selected: new Set(),
-    checked: false,
+    strings, frets: cfg.frets,
+    root: rand(ALL_ROOTS), scaleKey: rand(cfg.scales),
+    selected: new Set(), checked: false,
   };
 }
 function renderBuildQuiz(){
-  if (!state.quiz.build.root) newBuildQuestion();
+  if (!state.quiz.build) newBuildQuestion();
   const b = state.quiz.build;
   const rootPc = pcOf(b.root);
   const degMap = scaleDegreeMap(rootPc, b.scaleKey);
   const flat = FLAT_ROOTS.has(b.root);
+  const tuning = TUNINGS[state.instrument][state.stringCount];
+  const stringLabel = joinNames(b.strings.map(i => tuning[i])) + (b.strings.length > 1 ? ' strings' : ' string');
 
   document.getElementById('quiz-question').innerHTML =
-    'Tap every fret on the <b>' + TUNINGS[state.instrument][state.stringCount][b.string] + ' string</b> that belongs to '
+    'Tap every fret on the <b>' + stringLabel + '</b> that belongs to '
     + '<b>' + b.root + ' ' + SCALES[b.scaleKey].label + '</b>.';
 
   document.getElementById('quiz-answers').innerHTML = '';
 
   buildFretboard(document.getElementById('quiz-fretboard'), {
-    instrument: state.instrument, stringCount: state.stringCount, fretCount: 15,
-    onCellClick: b.checked ? null : (s,f,pc) => {
-      if (s !== b.string) return;
-      if (b.selected.has(f)) b.selected.delete(f); else b.selected.add(f);
+    instrument: state.instrument, stringCount: state.stringCount, fretCount: b.frets,
+    onCellClick: b.checked ? null : (s,f) => {
+      if (!b.strings.includes(s)) return;
+      const key = s + ':' + f;
+      if (b.selected.has(key)) b.selected.delete(key); else b.selected.add(key);
       renderBuildQuiz();
     },
     decorate: (s,f,pc) => {
-      if (s !== b.string) return null;
+      if (!b.strings.includes(s)) return null;
+      const key = s + ':' + f;
       const inScale = degMap.has(pc);
-      const picked = b.selected.has(f);
+      const picked = b.selected.has(key);
       if (!b.checked){
         if (picked) return makeDot(noteName(pc,flat), '', 'pick');
         return null;
@@ -1083,13 +1262,16 @@ function renderBuildQuiz(){
     checkBtn.addEventListener('click', () => {
       b.checked = true;
       let inScaleTotal = 0, hits = 0, wrong = 0;
-      for (let f=0; f<=15; f++){
-        const pc = pitchAt(state.instrument, state.stringCount, b.string, f);
-        const inScale = degMap.has(pc);
-        if (inScale) inScaleTotal++;
-        if (inScale && b.selected.has(f)) hits++;
-        if (!inScale && b.selected.has(f)) wrong++;
-      }
+      b.strings.forEach(s => {
+        for (let f=0; f<=b.frets; f++){
+          const pc = pitchAt(state.instrument, state.stringCount, s, f);
+          const inScale = degMap.has(pc);
+          const key = s + ':' + f;
+          if (inScale) inScaleTotal++;
+          if (inScale && b.selected.has(key)) hits++;
+          if (!inScale && b.selected.has(key)) wrong++;
+        }
+      });
       const perfect = hits === inScaleTotal && wrong === 0;
       recordAnswer(perfect, perfect ? 'All ' + inScaleTotal + ' notes found.' : (hits + '/' + inScaleTotal + ' found, ' + wrong + ' extra — dashed rings show what you missed.'));
       renderBuildQuiz();
@@ -1098,23 +1280,6 @@ function renderBuildQuiz(){
   } else {
     addNextButton(() => { newBuildQuestion(); renderQuiz(); });
   }
-}
-
-function recordAnswer(ok, msg){
-  const sc = state.quiz.scores[state.quiz.mode];
-  sc.t++; if (ok) sc.c++;
-  state.quiz.streak = ok ? state.quiz.streak+1 : 0;
-  const fb = document.getElementById('quiz-feedback');
-  fb.textContent = msg;
-  fb.className = 'feedback ' + (ok ? 'good':'bad');
-  updateScoreUI();
-}
-function addNextButton(fn){
-  const actions = document.getElementById('quiz-actions');
-  actions.innerHTML = '';
-  const b = el('button', {class:'btn primary'}, 'Next →');
-  b.addEventListener('click', fn);
-  actions.appendChild(b);
 }
 
 function renderQuiz(){
